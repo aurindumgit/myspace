@@ -13,7 +13,10 @@ import type {
   OrganizerItem,
   OrganizerSpace,
 } from "@/lib/organizer";
-import { createCaptureDraft } from "@/lib/organizer";
+import {
+  createCaptureDraft,
+  normalizeExpenseCurrency,
+} from "@/lib/organizer";
 import {
   createOrganizerBackup,
   decodeBackupImage,
@@ -123,11 +126,18 @@ function readStorage(): StoreSnapshot {
                     item.type === "list"
                   ? item.type
                   : "note";
+          const normalizedExpenses = Array.isArray(item.expenses)
+            ? item.expenses.map(normalizeExpenseCurrency)
+            : item.expenses;
           return ({
             ...rest,
             type: type as ItemType,
             spaceId: item.spaceId ?? categoryId,
             tags: Array.isArray(item.tags) ? item.tags : [],
+            expenses: normalizedExpenses,
+            ...(type === "expense" && !normalizedExpenses
+              ? { currency: "₹" }
+              : {}),
           }) as OrganizerItem;
         })
       : [];
@@ -151,7 +161,7 @@ function readStorage(): StoreSnapshot {
         id: item.id,
         title: item.title,
         amount: item.amount ?? null,
-        currency: item.currency ?? "",
+        currency: "₹",
         transactionKind: item.transactionKind ?? "expense",
         tags: item.tags ?? [],
       }));
@@ -228,14 +238,28 @@ function getServerSnapshot() {
 function saveSnapshot(next: StoreSnapshot, allowReadFailure = false) {
   if (snapshot.storageReadFailed && !allowReadFailure) return false;
 
+  const normalizedNext = {
+    ...next,
+    items: next.items.map((item) =>
+      item.type !== "expense"
+        ? item
+        : item.expenses
+          ? {
+              ...item,
+              expenses: item.expenses.map(normalizeExpenseCurrency),
+            }
+          : { ...item, currency: "₹" },
+    ),
+  };
+
   try {
     window.localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        items: next.items,
-        spaces: next.spaces,
-        tags: next.tags,
-        ideaTags: next.ideaTags,
+        items: normalizedNext.items,
+        spaces: normalizedNext.spaces,
+        tags: normalizedNext.tags,
+        ideaTags: normalizedNext.ideaTags,
       }),
     );
   } catch (error) {
@@ -249,7 +273,11 @@ function saveSnapshot(next: StoreSnapshot, allowReadFailure = false) {
     return false;
   }
 
-  snapshot = { ...next, storageError: undefined, storageReadFailed: false };
+  snapshot = {
+    ...normalizedNext,
+    storageError: undefined,
+    storageReadFailed: false,
+  };
   notify();
   return true;
 }
@@ -273,7 +301,7 @@ function saveCapture(draft: CaptureDraft, spaceName: string | null) {
   const expenses =
     draft.type === "expense"
       ? (draft.expenses ?? []).map((expense) => ({
-          ...expense,
+          ...normalizeExpenseCurrency(expense),
           id: expense.id ?? crypto.randomUUID(),
           tags: uniqueNames(expense.tags ?? []),
         }))

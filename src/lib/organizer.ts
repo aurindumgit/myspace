@@ -29,6 +29,21 @@ export type ExpenseDraft = {
   tags?: OrganizerTag[];
 };
 
+export function normalizeExpenseCurrency(expense: ExpenseDraft): ExpenseDraft {
+  return { ...expense, currency: "₹" };
+}
+
+export function getExpenseTotals(expenses: ExpenseDraft[]) {
+  return expenses.reduce(
+    (totals, expense) => {
+      if (expense.amount === null) return totals;
+      totals[expense.transactionKind] += expense.amount;
+      return totals;
+    },
+    { income: 0, expense: 0 },
+  );
+}
+
 export type OrganizerItem = {
   id: string;
   type: ItemType;
@@ -246,10 +261,6 @@ function getExpenses(text: string): ExpenseDraft[] {
     const amount = amountText
       ? Number.parseFloat(amountText.replace(/,/g, ""))
       : null;
-    const currencyToken = amountMatch?.[1] ?? amountMatch?.[4] ?? "";
-    const currency = /^(?:rs\.?|inr|ruppees?|rupees?)$/i.test(currencyToken)
-      ? "₹"
-      : currencyToken;
     const title = part
       .replace(
         /^\s*(?:i\s+)?(?:spent|paid|bought|received|earned|credited)\s+/i,
@@ -270,7 +281,7 @@ function getExpenses(text: string): ExpenseDraft[] {
     return {
       title: title || (incomeSignal ? "Income" : "Expense"),
       amount: Number.isFinite(amount) ? amount : null,
-      currency,
+      currency: "₹",
       transactionKind: incomeSignal ? "income" : "expense",
     };
   });

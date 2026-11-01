@@ -3,6 +3,8 @@ import { describe, it } from "node:test";
 import {
   createCaptureDraft,
   detectType,
+  getExpenseTotals,
+  normalizeExpenseCurrency,
   parseReminderDate,
 } from "../src/lib/organizer";
 import { parseOrganizerBackup } from "../src/lib/organizer-backup";
@@ -39,6 +41,26 @@ describe("capture detection", () => {
     );
   });
 
+  it("uses rupees for entries with rs, a rupee symbol, or no currency marker", () => {
+    const draft = createCaptureDraft(
+      "expense",
+      "Groceries\n23rs cloth\n₹40 chips\nSalary 50000",
+    );
+
+    assert.deepEqual(
+      draft.expenses?.map(({ amount, currency, transactionKind }) => ({
+        amount,
+        currency,
+        transactionKind,
+      })),
+      [
+        { amount: 23, currency: "₹", transactionKind: "expense" },
+        { amount: 40, currency: "₹", transactionKind: "expense" },
+        { amount: 50000, currency: "₹", transactionKind: "income" },
+      ],
+    );
+  });
+
   it("asks the user when a capture signals both money and a reminder", () => {
     const result = detectType("Pay rent ₹12000 tomorrow");
 
@@ -52,6 +74,34 @@ describe("capture detection", () => {
 
     assert.equal(result.type, "list");
     assert.equal(result.uncertain, false);
+  });
+});
+
+describe("rupee transaction totals", () => {
+  it("combines transactions regardless of their previously saved currency marker", () => {
+    const normalized = [
+      normalizeExpenseCurrency({
+        title: "Cash",
+        amount: 500,
+        currency: "",
+        transactionKind: "income",
+      }),
+      normalizeExpenseCurrency({
+        title: "Food",
+        amount: 120,
+        currency: "Rs",
+        transactionKind: "expense",
+      }),
+      normalizeExpenseCurrency({
+        title: "Travel",
+        amount: 80,
+        currency: "₹",
+        transactionKind: "expense",
+      }),
+    ];
+
+    assert.deepEqual(normalized.map(({ currency }) => currency), ["₹", "₹", "₹"]);
+    assert.deepEqual(getExpenseTotals(normalized), { income: 500, expense: 200 });
   });
 });
 

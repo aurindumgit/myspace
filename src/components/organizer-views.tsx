@@ -30,7 +30,9 @@ import {
 } from "lucide-react";
 import {
   createCaptureDraft,
+  getExpenseTotals,
   itemTypes,
+  normalizeExpenseCurrency,
   type ItemType,
   type OrganizerItem,
   type OrganizerSpace,
@@ -114,33 +116,24 @@ function formatMoney(amount?: number, currency = "") {
 }
 
 function getExpenseLines(item: OrganizerItem): ExpenseDraft[] {
-  if (item.expenses) return item.expenses;
+  if (item.expenses) return item.expenses.map(normalizeExpenseCurrency);
   if (item.amount !== undefined || item.currency || item.transactionKind) {
     return [
-      {
+      normalizeExpenseCurrency({
         id: item.id,
         title: item.title,
         amount: item.amount ?? null,
-        currency: item.currency ?? "",
+        currency: item.currency ?? "₹",
         transactionKind: item.transactionKind ?? "expense",
         tags: item.tags ?? [],
-      },
+      }),
     ];
   }
   return [];
 }
 
-function getExpenseTotals(item: OrganizerItem) {
-  return getExpenseLines(item).reduce<
-    Record<string, { income: number; expense: number }>
-  >((totals, line) => {
-    if (line.amount === null) return totals;
-    const currency = line.currency ?? "";
-    totals[currency] ??= { income: 0, expense: 0 };
-    totals[currency][line.transactionKind === "income" ? "income" : "expense"] +=
-      line.amount;
-    return totals;
-  }, {});
+function getExpenseLineTotals(item: OrganizerItem) {
+  return getExpenseTotals(getExpenseLines(item));
 }
 
 function ItemTypeBadge({
@@ -204,7 +197,7 @@ function SavedItemCard({
   const [editTags, setEditTags] = useState(item.tags ?? []);
   const [editError, setEditError] = useState("");
   const displayExpenseLines = getExpenseLines(item);
-  const expenseTotals = getExpenseTotals(item);
+  const expenseTotals = getExpenseLineTotals(item);
   const transactionKinds = new Set(
     displayExpenseLines.map((line) => line.transactionKind),
   );
@@ -299,7 +292,7 @@ function SavedItemCard({
           : undefined,
       expenses:
         editType === "expense"
-          ? expenseLines.map((expense) => ({
+          ? expenseLines.map((expense) => normalizeExpenseCurrency({
               ...expense,
               title: expense.title.trim(),
               id: expense.id ?? crypto.randomUUID(),
@@ -425,26 +418,22 @@ function SavedItemCard({
 
       {item.type === "expense" && (
         <div className="mt-3 space-y-2">
-          {Object.entries(expenseTotals).map(([currencyCode, totals]) => (
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs" key={currencyCode}>
-              {totals.expense > 0 && (
-                <span className="text-[#c4d2ec]">
-                  Spent {formatMoney(totals.expense, currencyCode)}
-                </span>
-              )}
-              {totals.income > 0 && (
-                <span className="text-[#b8d5b3]">
-                  Income {formatMoney(totals.income, currencyCode)}
-                </span>
-              )}
-              <span className="text-[#8e8a89]">
-                {displayExpenseLines.filter((line) => line.currency === currencyCode).length}{" "}
-                {displayExpenseLines.filter((line) => line.currency === currencyCode).length === 1
-                  ? "transaction"
-                  : "transactions"}
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+            {expenseTotals.expense > 0 && (
+              <span className="text-[#c4d2ec]">
+                Spent {formatMoney(expenseTotals.expense, "₹")}
               </span>
-            </div>
-          ))}
+            )}
+            {expenseTotals.income > 0 && (
+              <span className="text-[#b8d5b3]">
+                Income {formatMoney(expenseTotals.income, "₹")}
+              </span>
+            )}
+            <span className="text-[#8e8a89]">
+              {displayExpenseLines.length}{" "}
+              {displayExpenseLines.length === 1 ? "transaction" : "transactions"}
+            </span>
+          </div>
           <ul className="divide-y divide-white/[0.06] rounded-xl bg-[#171617] px-3">
             {displayExpenseLines.map((line, index) => (
               <li className="flex items-start gap-3 py-2" key={line.id ?? index}>
@@ -981,22 +970,12 @@ function SavedItemCard({
                         value={line.transactionKind}
                       />
                     </div>
-                    <label className="block space-y-1.5 text-xs text-[#aaa6a4]">
-                      Currency
-                      <input
-                        className="w-full rounded-xl border border-white/10 bg-[#171617] px-3 py-2.5 text-sm text-[#f4f0e9] outline-none focus:border-[#9fb5e3]/60"
-                        onChange={(event) =>
-                          setExpenseLines((current) =>
-                            current.map((entry, entryIndex) =>
-                              entryIndex === index
-                                ? { ...entry, currency: event.target.value }
-                                : entry,
-                            ),
-                          )
-                        }
-                        value={line.currency}
-                      />
-                    </label>
+                    <div className="space-y-1.5 text-xs text-[#aaa6a4]">
+                      <p>Currency</p>
+                      <p className="rounded-xl border border-white/10 bg-[#171617] px-3 py-2.5 text-sm text-[#f4f0e9]">
+                        ₹ INR
+                      </p>
+                    </div>
                   </div>
                   <TagPicker
                     availableTags={tags}
@@ -1746,60 +1725,42 @@ function MoneyBalanceSummary({ expenses }: { expenses: OrganizerItem[] }) {
     (count, item) => count + getExpenseLines(item).length,
     0,
   );
-  const currencyTotals = expenses
-    .flatMap(getExpenseLines)
-    .reduce<Record<string, { income: number; expense: number }>>(
-      (totals, line) => {
-        if (line.amount === null) return totals;
-        const currency = line.currency ?? "";
-        totals[currency] ??= { income: 0, expense: 0 };
-        totals[currency][line.transactionKind === "income" ? "income" : "expense"] +=
-          line.amount;
-        return totals;
-      },
-      {},
-    );
+  const totals = getExpenseTotals(expenses.flatMap(getExpenseLines));
 
   return (
     <>
       <p className="text-xs font-medium uppercase tracking-[0.16em] text-[#8e8a89]">
         Income · expenses · balance
       </p>
-      {Object.keys(currencyTotals).length ? (
-        <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          {Object.entries(currencyTotals).map(([currency, totals]) => (
-            <div className="rounded-2xl bg-[#171617] p-3" key={currency || "unspecified"}>
-              <p className="text-[11px] text-[#8e8a89]">
-                {currency || "Unspecified currency"} · all time
+      {transactionCount > 0 ? (
+        <div className="mt-3 rounded-2xl bg-[#171617] p-3">
+          <p className="text-[11px] text-[#8e8a89]">₹ INR · all time</p>
+          <div className="mt-2 grid grid-cols-3 gap-2">
+            <div>
+              <p className="text-xs text-[#9ebc99]">Income</p>
+              <p className="mt-1 break-words text-sm font-medium text-[#d5e5d0] sm:text-base">
+                {formatMoney(totals.income, "₹")}
               </p>
-              <div className="mt-2 grid grid-cols-3 gap-2">
-                <div>
-                  <p className="text-xs text-[#9ebc99]">Income</p>
-                  <p className="mt-1 break-words text-sm font-medium text-[#d5e5d0] sm:text-base">
-                    {formatMoney(totals.income, currency)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-[#9fb5e3]">Expense</p>
-                  <p className="mt-1 break-words text-sm font-medium text-[#d2ddf2] sm:text-base">
-                    {formatMoney(totals.expense, currency)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-[#c5d5f3]">Balance</p>
-                  <p
-                    className={`mt-1 break-words text-sm font-medium sm:text-base ${
-                      totals.income - totals.expense < 0
-                        ? "text-[#e2a39b]"
-                        : "text-[#f1ede7]"
-                    }`}
-                  >
-                    {formatMoney(totals.income - totals.expense, currency)}
-                  </p>
-                </div>
-              </div>
             </div>
-          ))}
+            <div>
+              <p className="text-xs text-[#9fb5e3]">Expense</p>
+              <p className="mt-1 break-words text-sm font-medium text-[#d2ddf2] sm:text-base">
+                {formatMoney(totals.expense, "₹")}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-[#c5d5f3]">Balance</p>
+              <p
+                className={`mt-1 break-words text-sm font-medium sm:text-base ${
+                  totals.income - totals.expense < 0
+                    ? "text-[#e2a39b]"
+                    : "text-[#f1ede7]"
+                }`}
+              >
+                {formatMoney(totals.income - totals.expense, "₹")}
+              </p>
+            </div>
+          </div>
         </div>
       ) : (
         <p className="mt-2 text-sm text-[#f1ede7]">
