@@ -1,6 +1,12 @@
 "use client";
 
-import { createContext, useContext, useSyncExternalStore } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import type {
   CaptureDraft,
   ItemType,
@@ -15,6 +21,7 @@ import {
   type OrganizerBackup,
 } from "@/lib/organizer-backup";
 import { deleteIdeaImage, saveIdeaImage } from "@/lib/idea-images";
+import { syncReminderNotifications } from "@/lib/reminder-notifications";
 
 const STORAGE_KEY = "commonplace-organizer-v1";
 
@@ -29,6 +36,7 @@ type StoreSnapshot = StoreData & {
   hydrated: boolean;
   storageError?: string;
   storageReadFailed?: boolean;
+  notificationError?: string;
 };
 
 type OrganizerStoreValue = StoreSnapshot & {
@@ -60,6 +68,12 @@ const listeners = new Set<() => void>();
 
 function notify() {
   listeners.forEach((listener) => listener());
+}
+
+export function reportNotificationError(message?: string) {
+  if (snapshot.notificationError === message) return;
+  snapshot = { ...snapshot, notificationError: message };
+  notify();
 }
 
 function uniqueNames(names: string[]) {
@@ -463,6 +477,34 @@ export function OrganizerStoreProvider({
   children: React.ReactNode;
 }) {
   const data = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const notificationSyncId = useRef(0);
+
+  useEffect(() => {
+    if (!data.hydrated) return;
+    const syncId = ++notificationSyncId.current;
+
+    void syncReminderNotifications(data.items)
+      .then(() => {
+        if (syncId === notificationSyncId.current) {
+          reportNotificationError(undefined);
+        }
+      })
+      .catch((cause: unknown) => {
+        console.error("Could not schedule myspace reminders.", cause);
+        if (syncId === notificationSyncId.current) {
+          reportNotificationError(
+            cause instanceof Error
+              ? cause.message
+              : "Reminder notifications could not be scheduled.",
+          );
+        }
+      });
+
+    return () => {
+      notificationSyncId.current += 1;
+    };
+  }, [data.hydrated, data.items]);
+
   const value: OrganizerStoreValue = {
     ...data,
     saveCapture,

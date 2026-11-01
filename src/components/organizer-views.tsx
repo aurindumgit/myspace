@@ -174,10 +174,17 @@ function ItemTypeBadge({
   );
 }
 
-function SavedItemCard({ item }: { item: OrganizerItem }) {
+function SavedItemCard({
+  item,
+  openForReschedule = false,
+}: {
+  item: OrganizerItem;
+  openForReschedule?: boolean;
+}) {
   const { spaces, tags, ideaTags, deleteItem, updateItem } = useOrganizerStore();
+  const router = useRouter();
   const space = spaces.find((entry) => entry.id === item.spaceId);
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(openForReschedule);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showOriginal, setShowOriginal] = useState(false);
   const [showAllContent, setShowAllContent] = useState(false);
@@ -330,6 +337,7 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
       }
     }
     setEditing(false);
+    if (openForReschedule) router.replace("/reminders/");
   }
 
   return (
@@ -364,8 +372,12 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
                 className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-sm text-[#d9d4d0] hover:bg-white/[0.07]"
                 onClick={(event) => {
                   event.currentTarget.closest("details")?.removeAttribute("open");
-                  if (editing) setEditing(false);
-                  else startEditing();
+                  if (editing) {
+                    setEditing(false);
+                    if (openForReschedule) router.replace("/reminders/");
+                  } else {
+                    startEditing();
+                  }
                 }}
                 type="button"
               >
@@ -1596,6 +1608,8 @@ export function LibraryView() {
 
 export function RemindersView() {
   const { items, hydrated } = useOrganizerStore();
+  const searchParams = useSearchParams();
+  const rescheduleId = searchParams.get("reschedule");
   const reminders = items
     .filter((item) => item.type === "reminder")
     .sort((a, b) => (a.dueAt ?? a.createdAt).localeCompare(b.dueAt ?? b.createdAt));
@@ -1608,7 +1622,7 @@ export function RemindersView() {
         Reminders
       </h1>
       <p className="mt-3 max-w-lg text-sm leading-6 text-[#a39e9b]">
-        Saved reminders appear here; they won&apos;t notify you outside myspace.
+        On Android, dated reminders alert at the scheduled time. Allow notifications and exact alarms when asked.
       </p>
 
       {!hydrated ? (
@@ -1622,7 +1636,11 @@ export function RemindersView() {
             <div className="space-y-3">
               {upcoming.length ? (
                 upcoming.map((item) => (
-                  <SavedItemCard item={item} key={item.id} />
+                  <SavedItemCard
+                    item={item}
+                    key={`${item.id}-${item.id === rescheduleId}`}
+                    openForReschedule={item.id === rescheduleId}
+                  />
                 ))
               ) : (
                 <p className="rounded-2xl bg-[#1d1b1c] p-4 text-sm text-[#8e8a89]">

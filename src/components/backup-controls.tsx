@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { Capacitor } from "@capacitor/core";
+import { Directory, Encoding, Filesystem } from "@capacitor/filesystem";
+import { Share } from "@capacitor/share";
 import { useOrganizerStore } from "@/components/organizer-store";
 
 export function BackupControls() {
@@ -24,8 +27,29 @@ export function BackupControls() {
     setBackupStatus("");
     try {
       const backup = await createBackup();
+      const backupData = JSON.stringify(backup, null, 2);
+      if (Capacitor.isNativePlatform()) {
+        const filename = `myspace-backup-${new Date().toISOString().slice(0, 10)}.json`;
+        const { uri } = await Filesystem.writeFile({
+          path: filename,
+          data: backupData,
+          directory: Directory.Cache,
+          encoding: Encoding.UTF8,
+        });
+        await Share.share({
+          title: "myspace backup",
+          text: "Save this backup outside myspace so it can be restored after reinstalling.",
+          files: [uri],
+          dialogTitle: "Save myspace backup",
+        });
+        setBackupStatus(
+          "Choose Files or another storage app in the share sheet to save this backup outside myspace.",
+        );
+        return;
+      }
+
       const url = URL.createObjectURL(
-        new Blob([JSON.stringify(backup, null, 2)], {
+        new Blob([backupData], {
           type: "application/json",
         }),
       );

@@ -1,7 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect } from "react";
+import { Capacitor } from "@capacitor/core";
+import { LocalNotifications } from "@capacitor/local-notifications";
 import {
   Archive,
   CalendarDays,
@@ -9,7 +12,10 @@ import {
   ReceiptText,
 } from "lucide-react";
 import { CaptureBox } from "@/components/capture-box";
-import { useOrganizerStore } from "@/components/organizer-store";
+import {
+  reportNotificationError,
+  useOrganizerStore,
+} from "@/components/organizer-store";
 
 const tabs = [
   { label: "Home", href: "/", icon: House },
@@ -20,7 +26,56 @@ const tabs = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { storageError, retryStorage } = useOrganizerStore();
+  const router = useRouter();
+  const {
+    storageError,
+    notificationError,
+    retryStorage,
+    updateItem: updateReminder,
+  } = useOrganizerStore();
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+
+    let disposed = false;
+    let listener: { remove: () => Promise<void> } | undefined;
+    void LocalNotifications.addListener(
+      "localNotificationActionPerformed",
+      (action) => {
+        const reminderId = action.notification.extra?.reminderId;
+        if (typeof reminderId !== "string") return;
+
+        if (action.actionId === "done") {
+          if (!updateReminder(reminderId, { done: true })) {
+            reportNotificationError(
+              "This reminder could not be marked done. Check saved-data access and try again.",
+            );
+          }
+        } else if (action.actionId === "reschedule") {
+          router.push(
+            `/reminders/?reschedule=${encodeURIComponent(reminderId)}`,
+          );
+        } else {
+          router.push(`/reminders/#${encodeURIComponent(reminderId)}`);
+        }
+      },
+    )
+      .then((handle) => {
+        if (disposed) void handle.remove();
+        else listener = handle;
+      })
+      .catch((cause: unknown) => {
+        console.error("Could not listen for reminder notification actions.", cause);
+        reportNotificationError(
+          "Reminder notification actions are unavailable. Restart myspace and try again.",
+        );
+      });
+
+    return () => {
+      disposed = true;
+      if (listener) void listener.remove();
+    };
+  }, [router, updateReminder]);
 
   return (
     <div className="min-h-screen md:flex">
@@ -80,6 +135,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             >
               Retry
             </button>
+          </div>
+        )}
+
+        {notificationError && (
+          <div
+            aria-live="assertive"
+            className="mx-auto mt-4 w-full max-w-6xl rounded-xl border border-[#8a6f42]/40 bg-[#493b25]/40 px-4 py-3 text-sm text-[#f0e2c6]"
+            role="alert"
+          >
+            {notificationError}
           </div>
         )}
 

@@ -6,6 +6,10 @@ import {
   parseReminderDate,
 } from "../src/lib/organizer";
 import { parseOrganizerBackup } from "../src/lib/organizer-backup";
+import {
+  getReminderNotificationId,
+  getScheduledReminders,
+} from "../src/lib/reminder-notifications";
 
 describe("capture detection", () => {
   it("detects reminders and keeps the action as the title", () => {
@@ -81,6 +85,59 @@ describe("backup validation", () => {
 
   it("accepts a complete backup with attached images", () => {
     assert.equal(parseOrganizerBackup(validBackup).data.items.length, 1);
+  });
+
+  describe("reminder notifications", () => {
+    it("only schedules future, incomplete reminders with a due time", () => {
+      const now = Date.parse("2026-11-01T10:00:00.000Z");
+      const items = [
+        {
+          id: "future",
+          type: "reminder",
+          title: "Future",
+          rawText: "Future",
+          createdAt: "2026-11-01T09:00:00.000Z",
+          dueAt: "2026-11-01T11:00:00.000Z",
+        },
+        {
+          id: "completed",
+          type: "reminder",
+          title: "Completed",
+          rawText: "Completed",
+          createdAt: "2026-11-01T09:00:00.000Z",
+          dueAt: "2026-11-01T11:00:00.000Z",
+          done: true,
+        },
+        {
+          id: "past",
+          type: "reminder",
+          title: "Past",
+          rawText: "Past",
+          createdAt: "2026-11-01T09:00:00.000Z",
+          dueAt: "2026-11-01T09:00:00.000Z",
+        },
+        {
+          id: "unscheduled",
+          type: "reminder",
+          title: "Unscheduled",
+          rawText: "Unscheduled",
+          createdAt: "2026-11-01T09:00:00.000Z",
+        },
+      ] as const;
+
+      assert.deepEqual(
+        getScheduledReminders([...items], now).map(({ id }) => id),
+        ["future"],
+      );
+    });
+
+    it("creates a stable positive Android notification ID", () => {
+      const id = getReminderNotificationId("reminder-123");
+
+      assert.ok(id > 0);
+      assert.equal(getReminderNotificationId("reminder-123"), id);
+      assert.notEqual(getReminderNotificationId("reminder-456"), id);
+    });
   });
 
   it("rejects backups with missing image data", () => {
