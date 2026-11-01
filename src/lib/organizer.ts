@@ -4,7 +4,8 @@ export const itemTypes = [
   "reminder",
   "expense",
   "list",
-  "moodboard",
+  "recipe",
+  "idea",
   "note",
 ] as const;
 
@@ -18,6 +19,15 @@ export type OrganizerSpace = {
 };
 
 export type OrganizerTag = string;
+
+export type ExpenseDraft = {
+  id?: string;
+  title: string;
+  amount: number | null;
+  currency: string;
+  transactionKind: TransactionKind;
+  tags?: OrganizerTag[];
+};
 
 export type OrganizerItem = {
   id: string;
@@ -34,14 +44,11 @@ export type OrganizerItem = {
   currency?: string;
   transactionKind?: TransactionKind;
   entries?: { text: string; done: boolean }[];
-};
-
-export type ExpenseDraft = {
-  title: string;
-  amount: number | null;
-  currency: string;
-  transactionKind: TransactionKind;
-  tags?: OrganizerTag[];
+  expenses?: ExpenseDraft[];
+  ingredients?: string[];
+  steps?: string[];
+  link?: string;
+  imageId?: string;
 };
 
 export type CaptureDraft = {
@@ -51,6 +58,12 @@ export type CaptureDraft = {
   dueAt?: string;
   expenses?: ExpenseDraft[];
   entries?: string[];
+  body?: string;
+  ingredients?: string[];
+  steps?: string[];
+  link?: string;
+  tags?: OrganizerTag[];
+  imageId?: string;
 };
 
 export type Detection = {
@@ -62,8 +75,12 @@ export type Detection = {
 function getReminderDate(text: string) {
   const parsedDate = chrono.parse(text, new Date(), { forwardDate: true })[0];
   if (parsedDate) {
+    const date = parsedDate.start.date();
+    if (!parsedDate.start.isCertain("hour")) {
+      date.setHours(9, 0, 0, 0);
+    }
     return {
-      dueAt: parsedDate.start.date().toISOString(),
+      dueAt: date.toISOString(),
       text: parsedDate.text,
     };
   }
@@ -77,19 +94,19 @@ function getReminderDate(text: string) {
   const now = new Date();
   let year = now.getFullYear();
   let month = now.getMonth();
-  let candidate = new Date(year, month, day, 12);
+  let candidate = new Date(year, month, day, 9);
   if (candidate <= now) {
     month += 1;
-    candidate = new Date(year, month, day, 12);
+    candidate = new Date(year, month, day, 9);
   }
   while (candidate.getDate() !== day) {
     month += 1;
-    candidate = new Date(year, month, day, 12);
+    candidate = new Date(year, month, day, 9);
   }
 
   year = candidate.getFullYear();
   return {
-    dueAt: new Date(year, candidate.getMonth(), day, 12).toISOString(),
+    dueAt: new Date(year, candidate.getMonth(), day, 9).toISOString(),
     text: dayMatch[0],
   };
 }
@@ -98,7 +115,9 @@ function getTransactionSignals(text: string) {
   const dateText = getReminderDate(text)?.text;
   const transactionText = dateText ? text.replace(dateText, " ") : text;
   const hasCurrencyAmount =
-    /[₹$€£¥]\s*\d|\d[\d,]*(?:\.\d{1,2})?\s*[₹$€£¥]/.test(transactionText);
+    /(?:[₹$€£¥]|\b(?:rs\.?|inr|ruppees?|rupees?))\s*\d|\d[\d,]*(?:\.\d{1,2})?\s*(?:[₹$€£¥]|(?:rs\.?|inr|ruppees?|rupees?)\b)/i.test(
+      transactionText,
+    );
   const hasAmount = /\d[\d,]*(?:\.\d{1,2})?/.test(transactionText);
   const incomeSignal =
     /\b(?:income|salary|paycheck|wages?|earned|earning|received|credited|deposit|refund|revenue|bonus|commission)\b/i.test(
@@ -122,7 +141,8 @@ export const typeLabels: Record<ItemType, string> = {
   reminder: "Reminder",
   expense: "Expense",
   list: "List",
-  moodboard: "Moodboard",
+  recipe: "Recipe",
+  idea: "Idea",
   note: "Note",
 };
 
@@ -130,13 +150,17 @@ export const defaultSpaceNames: Record<ItemType, string> = {
   reminder: "Reminders",
   expense: "Transactions",
   list: "Lists",
-  moodboard: "Moodboards",
+  recipe: "Recipes",
+  idea: "Ideas",
   note: "Notes",
 };
 
 export function detectType(text: string): Detection {
   const dueAt = parseReminderDate(text);
-  const reminderSignal = /\b(remind me|reminder|due)\b/i.test(text) || Boolean(dueAt);
+  const reminderSignal =
+    /\b(?:remind(?:\s+me)?(?:\s+to|\s+on|\s+by|\s+at)?|reminder|due)\b/i.test(
+      text,
+    ) || Boolean(dueAt);
   const { incomeSignal, expenseSignal, explicitExpenseSignal } =
     getTransactionSignals(text);
   const moneySignal = incomeSignal || expenseSignal;
@@ -157,6 +181,13 @@ export function detectType(text: string): Detection {
     return { type: "expense", uncertain: false };
   }
 
+  const hasRecipeSections =
+    /\bingredients?\b/i.test(text) &&
+    /\b(?:method|steps?|directions?|instructions?|process)\b/i.test(text);
+  if (/\brecipe\b/i.test(text) || hasRecipeSections) {
+    return { type: "recipe", uncertain: false };
+  }
+
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const commaItems = text
     .split(/,(?!\d{3}(?:\D|$))/)
@@ -175,7 +206,7 @@ export function detectType(text: string): Detection {
   const urls = text.match(/https?:\/\/\S+/gi) ?? [];
   const textWithoutUrls = text.replace(/https?:\/\/\S+/gi, " ").trim();
   if (urls.length > 0 && textWithoutUrls.split(/\s+/).filter(Boolean).length <= 8) {
-    return { type: "moodboard", uncertain: false };
+    return { type: "idea", uncertain: false };
   }
 
   return { type: "note", uncertain: false };
@@ -208,21 +239,24 @@ function getExpenses(text: string): ExpenseDraft[] {
   return parts.map((part) => {
     const { incomeSignal } = getTransactionSignals(part);
     const amountMatch = part.match(
-      /([₹$€£¥])\s*(\d[\d,]*(?:\.\d{1,2})?)|(\d[\d,]*(?:\.\d{1,2})?)\s*([₹$€£¥])/,
+      /([₹$€£¥]|\b(?:rs\.?|inr|ruppees?|rupees?))\s*(\d[\d,]*(?:\.\d{1,2})?)|(\d[\d,]*(?:\.\d{1,2})?)\s*([₹$€£¥]|(?:rs\.?|inr|ruppees?|rupees?)\b)/i,
     );
     const wordAmountMatch = part.match(/\d[\d,]*(?:\.\d{1,2})?/);
     const amountText = amountMatch?.[2] ?? amountMatch?.[3] ?? wordAmountMatch?.[0];
     const amount = amountText
       ? Number.parseFloat(amountText.replace(/,/g, ""))
       : null;
-    const currency = amountMatch?.[1] ?? amountMatch?.[4] ?? "";
+    const currencyToken = amountMatch?.[1] ?? amountMatch?.[4] ?? "";
+    const currency = /^(?:rs\.?|inr|ruppees?|rupees?)$/i.test(currencyToken)
+      ? "₹"
+      : currencyToken;
     const title = part
       .replace(
         /^\s*(?:i\s+)?(?:spent|paid|bought|received|earned|credited)\s+/i,
         "",
       )
       .replace(
-        /[₹$€£¥]\s*\d[\d,]*(?:\.\d{1,2})?|\d[\d,]*(?:\.\d{1,2})?\s*[₹$€£¥]?/,
+        /(?:[₹$€£¥]|\b(?:rs\.?|inr|ruppees?|rupees?))\s*\d[\d,]*(?:\.\d{1,2})?|\d[\d,]*(?:\.\d{1,2})?\s*(?:[₹$€£¥]|(?:rs\.?|inr|ruppees?|rupees?)\b)?/i,
         "",
       )
       .replace(
@@ -242,6 +276,63 @@ function getExpenses(text: string): ExpenseDraft[] {
   });
 }
 
+function getRecipeSections(text: string) {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const ingredientHeader = /^(?:ingredients?)\s*:?$/i;
+  const stepHeader = /^(?:method|steps?|directions?|instructions?|process)\s*:?$/i;
+  let section: "ingredients" | "steps" | null = null;
+  const ingredients: string[] = [];
+  const steps: string[] = [];
+
+  for (const [index, rawLine] of lines.entries()) {
+    const line = rawLine.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim();
+    const ingredientMatch = line.match(/^(?:ingredients?)\s*:\s*(.+)$/i);
+    const stepMatch = line.match(
+      /^(?:method|steps?|directions?|instructions?|process)\s*:\s*(.+)$/i,
+    );
+    if (ingredientMatch) {
+      section = "ingredients";
+      ingredients.push(ingredientMatch[1].trim());
+      continue;
+    }
+    if (stepMatch) {
+      section = "steps";
+      steps.push(stepMatch[1].trim());
+      continue;
+    }
+    if (ingredientHeader.test(line)) {
+      section = "ingredients";
+      continue;
+    }
+    if (stepHeader.test(line)) {
+      section = "steps";
+      continue;
+    }
+    if (index === 0 && /^recipe\s*[:–—-]/i.test(line)) continue;
+    if (section === "ingredients") ingredients.push(line);
+    if (section === "steps") steps.push(line);
+  }
+
+  return { ingredients, steps };
+}
+
+function getIdeaLink(text: string) {
+  return text.match(/https?:\/\/\S+/i)?.[0]?.replace(/[.,!?]+$/, "");
+}
+
+function getExpenseTitle(text: string, expenses: ExpenseDraft[]) {
+  const parts = text
+    .split(/\r?\n|,(?!\d{3}(?:\D|$))/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const amountPattern =
+    /(?:[₹$€£¥]|\b(?:rs\.?|inr|ruppees?|rupees?))\s*\d|\d[\d,]*(?:\.\d{1,2})?\s*(?:[₹$€£¥]|(?:rs\.?|inr|ruppees?|rupees?)\b)/i;
+  if (parts.length > 1 && !amountPattern.test(parts[0])) {
+    return parts[0].replace(/^[\s:–—-]+|[\s:–—-]+$/g, "").trim();
+  }
+  return expenses[0]?.title || "Expense";
+}
+
 export function createCaptureDraft(
   type: ItemType,
   rawText: string,
@@ -253,10 +344,20 @@ export function createCaptureDraft(
     cleanedText;
 
   if (type === "expense") {
-    const expenses = getExpenses(cleanedText);
+    const parts = cleanedText
+      .split(/\r?\n|,(?!\d{3}(?:\D|$))/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+    const amountPattern =
+      /(?:[₹$€£¥]|\b(?:rs\.?|inr|ruppees?|rupees?))\s*\d|\d[\d,]*(?:\.\d{1,2})?\s*(?:[₹$€£¥]|(?:rs\.?|inr|ruppees?|rupees?)\b)/i;
+    const hasHeader =
+      parts.length > 1 &&
+      !amountPattern.test(parts[0]) &&
+      parts.slice(1).some((part) => amountPattern.test(part));
+    const expenses = getExpenses(hasHeader ? parts.slice(1).join("\n") : cleanedText);
     return {
       type,
-      title: expenses[0]?.title ?? "Expense",
+      title: hasHeader ? parts[0] : getExpenseTitle(cleanedText, expenses),
       rawText,
       expenses,
     };
@@ -290,13 +391,51 @@ export function createCaptureDraft(
     };
   }
 
+  if (type === "recipe") {
+    const title = firstLine
+      .replace(/^recipe\s*[:–—-]\s*/i, "")
+      .trim()
+      .slice(0, 80);
+    return {
+      type,
+      title: title || "Recipe",
+      rawText,
+      ...getRecipeSections(cleanedText),
+    };
+  }
+
+  if (type === "idea") {
+    const link = getIdeaLink(cleanedText);
+    const body = link
+      ? cleanedText.replace(link, "").trim()
+      : cleanedText;
+    const firstContentLine = body.split(/\r?\n/).find((line) => line.trim())?.trim();
+    let linkTitle = "";
+    if (link) {
+      try {
+        linkTitle = new URL(link).hostname.replace(/^www\./, "");
+      } catch {
+        linkTitle = "";
+      }
+    }
+    const title =
+      firstContentLine
+        ?.replace(/^(?:idea|image)\s*[:–—-]\s*/i, "")
+        .slice(0, 80) ||
+      linkTitle ||
+      "Idea";
+    return { type, title, rawText, body, link };
+  }
+
   if (type === "reminder") {
     const dateText = dueAt ? getReminderDate(cleanedText)?.text : undefined;
     const title = cleanedText
       .replace(dateText ?? /\b(?:today|tomorrow|tonight|next week|next month)\b/i, "")
-      .replace(/^\s*(?:remind me|reminder|due)\s*(?:to|on|by|at)?\s*/i, "")
+      .replace(/^\s*(?:please\s+)?remind(?:\s+me)?(?:\s+to|\s+on|\s+by|\s+at)?\s*/i, "")
+      .replace(/^\s*(?:reminder|due)(?:\s+to|\s+on|\s+by|\s+at)?\s*/i, "")
       .replace(/\s+/g, " ")
       .replace(/^[\s:–—-]+|[\s:–—-]+$/g, "")
+      .replace(/\s+(?:to|on|by|at)\s*$/i, "")
       .replace(/^(?:to|on|by|at)\s+/i, "")
       .trim();
 
@@ -312,5 +451,6 @@ export function createCaptureDraft(
     type,
     title: firstLine.slice(0, 80),
     rawText,
+    body: cleanedText,
   };
 }

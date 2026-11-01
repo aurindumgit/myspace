@@ -72,7 +72,7 @@ export function TagPicker({
       <div className="flex gap-2">
         <input
           aria-label="Create a tag"
-          className="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#211f21] px-3 py-2.5 text-sm text-[#f4f0e9] outline-none placeholder:text-[#777376] focus:border-[#9fb5e3]/60"
+          className="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#211f21] px-3 py-2.5 text-sm text-[#f4f0e9] outline-none placeholder:text-[#969190] focus:border-[#9fb5e3]/60"
           onChange={(event) => setNewTag(event.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="Add a tag"

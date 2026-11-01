@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Commonplace — your personal organizer",
+  title: "myspace — your personal organizer",
   description: "A calm home for reminders, expenses, lists, and notes.",
 };
 

@@ -1,18 +1,28 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useMemo, useState, type FormEvent } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import {
+  Suspense,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from "react";
 import {
   ArrowUpRight,
   Archive,
   CalendarDays,
+  ChefHat,
   Check,
   Clock3,
+  ExternalLink,
   MoreHorizontal,
   Pencil,
   Plus,
   ReceiptText,
   Save,
+  Search,
   ShoppingBasket,
   Sparkles,
   Trash2,
@@ -25,17 +35,52 @@ import {
   type OrganizerItem,
   type OrganizerSpace,
   type TransactionKind,
+  type ExpenseDraft,
   typeLabels,
 } from "@/lib/organizer";
 import { useOrganizerStore } from "@/components/organizer-store";
 import { Picker } from "@/components/picker";
+import { ReminderDateTimePicker } from "@/components/reminder-date-time-picker";
 import { TagPicker } from "@/components/tag-picker";
+import { IdeaImage } from "@/components/idea-image";
+import { BackupControls } from "@/components/backup-controls";
+import {
+  compressIdeaImage,
+  deleteIdeaImage,
+  saveIdeaImage,
+} from "@/lib/idea-images";
 
 function formatDay(value: string) {
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
   }).format(new Date(value));
+}
+
+function formatReminderDate(value: string) {
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(new Date(value));
+}
+
+const libraryTypes = itemTypes.filter((type) => type !== "expense");
+
+function searchableItemText(item: OrganizerItem) {
+  return [
+    item.title,
+    item.body,
+    item.rawText,
+    item.link,
+    ...(item.tags ?? []),
+    ...(item.entries?.map((entry) => entry.text) ?? []),
+    ...(item.ingredients ?? []),
+    ...(item.steps ?? []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLocaleLowerCase();
 }
 
 function formatMoney(amount?: number, currency = "") {
@@ -68,23 +113,52 @@ function formatMoney(amount?: number, currency = "") {
   }).format(amount);
 }
 
+function getExpenseLines(item: OrganizerItem): ExpenseDraft[] {
+  if (item.expenses) return item.expenses;
+  if (item.amount !== undefined || item.currency || item.transactionKind) {
+    return [
+      {
+        id: item.id,
+        title: item.title,
+        amount: item.amount ?? null,
+        currency: item.currency ?? "",
+        transactionKind: item.transactionKind ?? "expense",
+        tags: item.tags ?? [],
+      },
+    ];
+  }
+  return [];
+}
+
+function getExpenseTotals(item: OrganizerItem) {
+  return getExpenseLines(item).reduce<
+    Record<string, { income: number; expense: number }>
+  >((totals, line) => {
+    if (line.amount === null) return totals;
+    const currency = line.currency ?? "";
+    totals[currency] ??= { income: 0, expense: 0 };
+    totals[currency][line.transactionKind === "income" ? "income" : "expense"] +=
+      line.amount;
+    return totals;
+  }, {});
+}
+
 function ItemTypeBadge({
   type,
   transactionKind,
 }: {
   type: ItemType;
-  transactionKind?: TransactionKind;
+  transactionKind?: TransactionKind | "mixed";
 }) {
-  const Icon =
-    type === "reminder"
-      ? CalendarDays
-      : type === "expense"
-        ? ReceiptText
-        : type === "list"
-          ? ShoppingBasket
-          : type === "moodboard"
-            ? Sparkles
-            : Archive;
+  const icons: Record<ItemType, typeof Archive> = {
+    reminder: CalendarDays,
+    expense: ReceiptText,
+    list: ShoppingBasket,
+    recipe: ChefHat,
+    idea: Sparkles,
+    note: Archive,
+  };
+  const Icon = icons[type];
 
   return (
     <span className="inline-flex items-center gap-1.5 rounded-full bg-white/[0.06] px-2.5 py-1 text-[11px] text-[#aaa7a4]">
@@ -92,14 +166,16 @@ function ItemTypeBadge({
       {type === "expense"
         ? transactionKind === "income"
           ? "Income"
-          : "Expense"
+          : transactionKind === "mixed"
+            ? "Transactions"
+            : "Expense"
         : typeLabels[type]}
     </span>
   );
 }
 
 function SavedItemCard({ item }: { item: OrganizerItem }) {
-  const { spaces, tags, deleteItem, updateItem } = useOrganizerStore();
+  const { spaces, tags, ideaTags, deleteItem, updateItem } = useOrganizerStore();
   const space = spaces.find((entry) => entry.id === item.spaceId);
   const [editing, setEditing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -110,15 +186,25 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
   const [title, setTitle] = useState(item.title);
   const [body, setBody] = useState(item.body ?? item.rawText);
   const [entries, setEntries] = useState(item.entries ?? []);
+  const [expenseLines, setExpenseLines] = useState(() => getExpenseLines(item));
+  const [ingredients, setIngredients] = useState(item.ingredients ?? []);
+  const [steps, setSteps] = useState(item.steps ?? []);
+  const [link, setLink] = useState(item.link ?? "");
+  const [imageId, setImageId] = useState(item.imageId);
+  const [imageFile, setImageFile] = useState<File>();
   const [newEntry, setNewEntry] = useState("");
-  const [dueAt, setDueAt] = useState(toDateTimeLocal(item.dueAt));
-  const [amount, setAmount] = useState(item.amount?.toString() ?? "");
-  const [currency, setCurrency] = useState(item.currency ?? "");
-  const [transactionKind, setTransactionKind] = useState<TransactionKind>(
-    item.transactionKind ?? "expense",
-  );
+  const [dueAt, setDueAt] = useState(item.dueAt);
   const [editTags, setEditTags] = useState(item.tags ?? []);
   const [editError, setEditError] = useState("");
+  const displayExpenseLines = getExpenseLines(item);
+  const expenseTotals = getExpenseTotals(item);
+  const transactionKinds = new Set(
+    displayExpenseLines.map((line) => line.transactionKind),
+  );
+  const badgeTransactionKind: TransactionKind | "mixed" | undefined =
+    transactionKinds.size > 1
+      ? "mixed"
+      : transactionKinds.values().next().value ?? item.transactionKind;
 
   function startEditing() {
     setEditType(item.type);
@@ -126,11 +212,14 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
     setTitle(item.title);
     setBody(item.body ?? item.rawText);
     setEntries(item.entries ?? []);
+    setExpenseLines(getExpenseLines(item));
+    setIngredients(item.ingredients ?? []);
+    setSteps(item.steps ?? []);
+    setLink(item.link ?? "");
+    setImageId(item.imageId);
+    setImageFile(undefined);
     setNewEntry("");
-    setDueAt(toDateTimeLocal(item.dueAt));
-    setAmount(item.amount?.toString() ?? "");
-    setCurrency(item.currency ?? "");
-    setTransactionKind(item.transactionKind ?? "expense");
+    setDueAt(item.dueAt);
     setEditTags(item.tags ?? []);
     setEditError("");
     setEditing(true);
@@ -141,18 +230,17 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
     const draft = createCaptureDraft(type, item.rawText, item.dueAt);
     setEditType(type);
     setTitle(draft.title);
-    setBody(item.rawText);
+    setBody(draft.body ?? item.rawText);
     setEntries((draft.entries ?? []).map((text) => ({ text, done: false })));
-    if (draft.type === "expense") {
-      const expense = draft.expenses?.[0];
-      setAmount(expense?.amount?.toString() ?? "");
-      setCurrency(expense?.currency ?? "");
-      setTransactionKind(expense?.transactionKind ?? "expense");
-    }
-    if (draft.type === "reminder") setDueAt(toDateTimeLocal(draft.dueAt));
+    setExpenseLines(draft.expenses ?? []);
+    setIngredients(draft.ingredients ?? []);
+    setSteps(draft.steps ?? []);
+    setLink(draft.link ?? "");
+    setEditTags(draft.tags ?? []);
+    if (draft.type === "reminder") setDueAt(draft.dueAt);
   }
 
-  function saveEdits() {
+  async function saveEdits() {
     if (!title.trim()) {
       setEditError("Add a title before saving.");
       return;
@@ -161,29 +249,87 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
       setEditError("Add at least one list item.");
       return;
     }
+    if (editType === "recipe" && (!ingredients.length || !steps.length)) {
+      setEditError("Add at least one ingredient and one process step.");
+      return;
+    }
+    if (
+      editType === "expense" &&
+      (!expenseLines.length || expenseLines.some((expense) => !expense.title.trim()))
+    ) {
+      setEditError("Keep at least one named transaction in this capture.");
+      return;
+    }
+    if (
+      editType === "idea" &&
+      link.trim() &&
+      !/^https?:\/\//i.test(link.trim())
+    ) {
+      setEditError("Use a link that starts with http:// or https://.");
+      return;
+    }
 
-    updateItem(item.id, {
+    const previousImageId = item.imageId;
+    let savedImageId = editType === "idea" ? imageId : undefined;
+    try {
+      if (imageFile) {
+        savedImageId = crypto.randomUUID();
+        await saveIdeaImage(savedImageId, await compressIdeaImage(imageFile));
+      }
+    } catch (cause) {
+      console.error("Could not update this idea image.", cause);
+      setEditError("The image could not be updated on this device.");
+      return;
+    }
+
+    const updated = updateItem(item.id, {
       type: editType,
       title: title.trim(),
-      body: editType === "note" || editType === "moodboard" ? body : undefined,
+      body: editType === "note" || editType === "idea" ? body : undefined,
       entries:
         editType === "list"
           ? entries.filter((entry) => entry.text.trim())
           : undefined,
-      dueAt: editType === "reminder" && dueAt ? new Date(dueAt).toISOString() : undefined,
-      amount:
-        editType === "expense" && amount.trim() ? Number(amount) : undefined,
-      currency: editType === "expense" ? currency.trim() || undefined : undefined,
-      transactionKind:
-        editType === "expense" ? transactionKind : undefined,
+      expenses:
+        editType === "expense"
+          ? expenseLines.map((expense) => ({
+              ...expense,
+              title: expense.title.trim(),
+              id: expense.id ?? crypto.randomUUID(),
+              tags: expense.tags ?? [],
+            }))
+          : undefined,
+      ingredients: editType === "recipe" ? ingredients : undefined,
+      steps: editType === "recipe" ? steps : undefined,
+      link: editType === "idea" ? link.trim() || undefined : undefined,
+      imageId: savedImageId,
+      dueAt: editType === "reminder" ? dueAt : undefined,
       spaceId:
         editType !== "expense" && editSpaceId !== "none"
           ? editSpaceId
           : undefined,
-      tags: editType === "expense" ? editTags : undefined,
+      tags: editType === "idea" ? editTags : undefined,
     });
+    if (!updated) {
+      if (imageFile && savedImageId) {
+        try {
+          await deleteIdeaImage(savedImageId);
+        } catch (cause) {
+          console.error("Could not clean up an unsaved idea image.", cause);
+        }
+      }
+      setEditError("These changes were not saved. Check the storage message and try again.");
+      return;
+    }
+    if (previousImageId && previousImageId !== savedImageId) {
+      try {
+        await deleteIdeaImage(previousImageId);
+      } catch (cause) {
+        console.error("Could not remove the previous idea image.", cause);
+        setEditError("The item was saved, but its previous image could not be removed.");
+      }
+    }
     setEditing(false);
-    setEditError("");
   }
 
   return (
@@ -202,7 +348,10 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          <ItemTypeBadge type={item.type} transactionKind={item.transactionKind} />
+          <ItemTypeBadge
+            type={item.type}
+            transactionKind={badgeTransactionKind}
+          />
           <details className="relative">
             <summary
               aria-label="More actions"
@@ -253,8 +402,8 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
       {item.type === "reminder" && item.dueAt && (
         <div className="mt-2 flex items-center gap-2 text-sm text-[#cbc8c5]">
           <Clock3 size={16} className="text-[#9fb5e3]" />
-          {formatDay(item.dueAt)}
-          <span className="text-[#858181]">·</span>
+          {formatReminderDate(item.dueAt)}
+          <span className="text-[#858181]">at</span>
           {new Intl.DateTimeFormat("en-US", {
             hour: "numeric",
             minute: "2-digit",
@@ -263,24 +412,64 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
       )}
 
       {item.type === "expense" && (
-        <p
-          className={`mt-2 text-base font-medium ${
-            item.transactionKind === "income" ? "text-[#b8d5b3]" : "text-[#c4d2ec]"
-          }`}
-        >
-          {formatMoney(item.amount, item.currency)}
-        </p>
-      )}
-      {item.type === "expense" && (item.tags?.length ?? 0) > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {item.tags?.map((tag) => (
-            <span
-              className="rounded-full bg-white/[0.06] px-2 py-1 text-[10px] text-[#aaa7a4]"
-              key={tag}
-            >
-              {tag}
-            </span>
+        <div className="mt-3 space-y-2">
+          {Object.entries(expenseTotals).map(([currencyCode, totals]) => (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs" key={currencyCode}>
+              {totals.expense > 0 && (
+                <span className="text-[#c4d2ec]">
+                  Spent {formatMoney(totals.expense, currencyCode)}
+                </span>
+              )}
+              {totals.income > 0 && (
+                <span className="text-[#b8d5b3]">
+                  Income {formatMoney(totals.income, currencyCode)}
+                </span>
+              )}
+              <span className="text-[#8e8a89]">
+                {displayExpenseLines.filter((line) => line.currency === currencyCode).length}{" "}
+                {displayExpenseLines.filter((line) => line.currency === currencyCode).length === 1
+                  ? "transaction"
+                  : "transactions"}
+              </span>
+            </div>
           ))}
+          <ul className="divide-y divide-white/[0.06] rounded-xl bg-[#171617] px-3">
+            {displayExpenseLines.map((line, index) => (
+              <li className="flex items-start gap-3 py-2" key={line.id ?? index}>
+                <span
+                  className={`min-w-0 flex-1 text-sm ${
+                    line.transactionKind === "income"
+                      ? "text-[#cfe0c8]"
+                      : "text-[#dedbd8]"
+                  }`}
+                >
+                  {line.title}
+                  {line.tags?.length ? (
+                    <span className="ml-2 inline-flex flex-wrap gap-1">
+                      {line.tags.map((tag) => (
+                        <span
+                          className="rounded-full bg-white/[0.06] px-2 py-0.5 text-[10px] text-[#aaa7a4]"
+                          key={tag}
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </span>
+                  ) : null}
+                </span>
+                <span
+                  className={`shrink-0 text-sm font-medium ${
+                    line.transactionKind === "income"
+                      ? "text-[#b8d5b3]"
+                      : "text-[#c4d2ec]"
+                  }`}
+                >
+                  {line.transactionKind === "income" ? "+" : "−"}
+                  {formatMoney(line.amount ?? undefined, line.currency)}
+                </span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
@@ -339,7 +528,7 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
         </>
       )}
 
-      {(item.type === "note" || item.type === "moodboard") && (
+      {(item.type === "note" || item.type === "idea") && (
         <>
           <p
             className={`mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-[#b8b4b1] ${
@@ -348,6 +537,34 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
           >
             {item.body ?? item.rawText}
           </p>
+          {item.type === "idea" && (
+            <>
+              {item.tags?.length ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {item.tags.map((tag) => (
+                    <span
+                      className="rounded-full bg-[#35496d]/40 px-2.5 py-1 text-[10px] text-[#c5d5f3]"
+                      key={tag}
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              {item.link && /^https?:\/\//i.test(item.link) && (
+                <a
+                  className="mt-2 inline-flex max-w-full items-center gap-1.5 truncate text-xs text-[#9fb5e3] hover:text-white"
+                  href={item.link}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  <ExternalLink size={13} className="shrink-0" />
+                  <span className="truncate">{item.link}</span>
+                </a>
+              )}
+              <IdeaImage imageId={item.imageId} />
+            </>
+          )}
           {((item.body ?? item.rawText).length > 160 ||
             (item.body ?? item.rawText).includes("\n")) && (
             <button
@@ -361,6 +578,44 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
         </>
       )}
 
+      {item.type === "recipe" && (
+        <div className="mt-3 grid gap-4 sm:grid-cols-2">
+          <section>
+            <h3 className="text-xs font-medium uppercase tracking-wide text-[#9fb5e3]">
+              Ingredients
+            </h3>
+            <ul className="mt-2 space-y-1.5">
+              {(item.ingredients ?? []).map((ingredient, index) => (
+                <li
+                  className="flex gap-2 text-sm leading-5 text-[#d9d4d0]"
+                  key={`${item.id}-ingredient-${index}`}
+                >
+                  <span className="text-[#9fb5e3]">•</span>
+                  <span>{ingredient}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+          <section>
+            <h3 className="text-xs font-medium uppercase tracking-wide text-[#9fb5e3]">
+              Steps
+            </h3>
+            <ol className="mt-2 space-y-2">
+              {(item.steps ?? []).map((step, index) => (
+                <li
+                  className="flex gap-2 text-sm leading-5 text-[#d9d4d0]"
+                  key={`${item.id}-step-${index}`}
+                >
+                  <span className="text-xs font-medium text-[#9fb5e3]">
+                    {index + 1}.
+                  </span>
+                  <span>{step}</span>
+                </li>
+              ))}
+            </ol>
+          </section>
+        </div>
+      )}
       {item.type === "reminder" && (
         <button
           aria-pressed={item.done}
@@ -397,12 +652,24 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
           </button>
           <button
             className="rounded-full bg-[#8a514c] px-3 py-1 text-xs text-white hover:bg-[#a15f59]"
-            onClick={() => deleteItem(item.id)}
+            onClick={async () => {
+              try {
+                await deleteItem(item.id);
+              } catch (cause) {
+                console.error("Could not delete this saved item.", cause);
+                setEditError("The item could not be deleted. Try again.");
+              }
+            }}
             type="button"
           >
             Delete item
           </button>
         </div>
+      )}
+      {editError && !editing && (
+        <p className="mt-2 text-xs text-[#f19a91]" role="alert">
+          {editError}
+        </p>
       )}
 
       {editing && (
@@ -449,7 +716,7 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
             />
           </label>
 
-          {(editType === "note" || editType === "moodboard") && (
+          {(editType === "note" || editType === "idea") && (
             <label className="block space-y-1.5 text-xs text-[#aaa6a4]">
               Content
               <textarea
@@ -458,6 +725,96 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
                 value={body}
               />
             </label>
+          )}
+
+          {editType === "idea" && (
+            <div className="space-y-4">
+              <label className="block space-y-1.5 text-xs text-[#aaa6a4]">
+                Link (optional)
+                <input
+                  className="w-full rounded-xl border border-white/10 bg-[#211f21] px-3 py-2.5 text-sm text-[#f4f0e9] outline-none focus:border-[#9fb5e3]/60"
+                  onChange={(event) => setLink(event.target.value)}
+                  type="url"
+                  value={link}
+                />
+              </label>
+              <TagPicker
+                availableTags={ideaTags}
+                onChange={setEditTags}
+                value={editTags}
+              />
+              <IdeaImage imageId={imageId} />
+              <label className="block text-xs text-[#aaa6a4]">
+                {imageId ? "Replace image" : "Add an image"}
+                <input
+                  accept="image/*"
+                  className="mt-1.5 block w-full text-sm text-[#b8b4b1] file:mr-3 file:rounded-full file:border-0 file:bg-[#35496d] file:px-3 file:py-2 file:text-xs file:text-[#e2eafb]"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (!file) return;
+                    if (!file.type.startsWith("image/")) {
+                      setEditError("Choose an image file.");
+                      event.target.value = "";
+                      return;
+                    }
+                    if (file.size > 15 * 1024 * 1024) {
+                      setEditError("Choose an image smaller than 15 MB.");
+                      event.target.value = "";
+                      return;
+                    }
+                    setEditError("");
+                    setImageFile(file);
+                  }}
+                  type="file"
+                />
+              </label>
+              {imageFile && (
+                <p className="text-xs text-[#aaa6a4]">
+                  New image: {imageFile.name}
+                </p>
+              )}
+              {imageId && (
+                <button
+                  className="text-xs text-[#c98e89] hover:text-white"
+                  onClick={() => {
+                    setImageId(undefined);
+                    setImageFile(undefined);
+                  }}
+                  type="button"
+                >
+                  Remove image
+                </button>
+              )}
+            </div>
+          )}
+
+          {editType === "recipe" && (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="block space-y-1.5 text-xs text-[#aaa6a4]">
+                Ingredients (one per line)
+                <textarea
+                  className="min-h-28 w-full rounded-xl border border-white/10 bg-[#211f21] px-3 py-2.5 text-sm leading-6 text-[#f4f0e9] outline-none focus:border-[#9fb5e3]/60"
+                  onChange={(event) =>
+                    setIngredients(
+                      event.target.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
+                    )
+                  }
+                  value={ingredients.join("\n")}
+                />
+              </label>
+              <label className="block space-y-1.5 text-xs text-[#aaa6a4]">
+                Steps (one per line)
+                <textarea
+                  className="min-h-28 w-full rounded-xl border border-white/10 bg-[#211f21] px-3 py-2.5 text-sm leading-6 text-[#f4f0e9] outline-none focus:border-[#9fb5e3]/60"
+                  onChange={(event) =>
+                    setSteps(
+                      event.target.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
+                    )
+                  }
+                  value={steps.join("\n")}
+                />
+              </label>
+            </div>
           )}
 
           {editType === "list" && (
@@ -496,7 +853,7 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
               <div className="flex items-center gap-2">
                 <input
                   aria-label="New list item"
-                  className="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#211f21] px-3 py-2.5 text-sm text-[#f4f0e9] outline-none placeholder:text-[#777376] focus:border-[#9fb5e3]/60"
+                  className="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#211f21] px-3 py-2.5 text-sm text-[#f4f0e9] outline-none placeholder:text-[#969190] focus:border-[#9fb5e3]/60"
                   onChange={(event) => setNewEntry(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
@@ -533,63 +890,149 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
           )}
 
           {editType === "reminder" && (
-            <label className="block space-y-1.5 text-xs text-[#aaa6a4]">
-              Reminder date and time
-              <input
-                className="w-full rounded-xl border border-white/10 bg-[#211f21] px-3 py-2.5 text-sm text-[#f4f0e9] outline-none color-scheme-dark focus:border-[#9fb5e3]/60"
-                onChange={(event) => setDueAt(event.target.value)}
-                type="datetime-local"
-                value={dueAt}
-              />
-            </label>
+            <div className="space-y-1.5">
+              <p className="text-xs text-[#aaa6a4]">Reminder date and time</p>
+              <ReminderDateTimePicker onChange={setDueAt} value={dueAt} />
+            </div>
           )}
 
           {editType === "expense" && (
-            <>
-              <TagPicker
-                availableTags={tags}
-                onChange={setEditTags}
-                value={editTags}
-              />
-              <div className="space-y-1.5">
-                <p className="text-xs text-[#aaa6a4]">Income or expense</p>
-                <Picker
-                  label="Transaction type"
-                  onChange={(value) => {
-                    if (value === "income" || value === "expense") {
-                      setTransactionKind(value);
+            <div className="space-y-3">
+              <h3 className="text-xs font-medium text-[#aaa6a4]">Transactions in this capture</h3>
+              {expenseLines.map((line, index) => (
+                <div
+                  className="space-y-3 rounded-xl border border-white/[0.08] bg-[#211f21] p-3"
+                  key={line.id ?? index}
+                >
+                  <div className="grid grid-cols-[minmax(0,1fr)_7rem] gap-2">
+                    <label className="block space-y-1.5 text-xs text-[#aaa6a4]">
+                      Name
+                      <input
+                        className="w-full rounded-xl border border-white/10 bg-[#171617] px-3 py-2.5 text-sm text-[#f4f0e9] outline-none focus:border-[#9fb5e3]/60"
+                        onChange={(event) =>
+                          setExpenseLines((current) =>
+                            current.map((entry, entryIndex) =>
+                              entryIndex === index
+                                ? { ...entry, title: event.target.value }
+                                : entry,
+                            ),
+                          )
+                        }
+                        value={line.title}
+                      />
+                    </label>
+                    <label className="block space-y-1.5 text-xs text-[#aaa6a4]">
+                      Amount
+                      <input
+                        className="w-full rounded-xl border border-white/10 bg-[#171617] px-3 py-2.5 text-sm text-[#f4f0e9] outline-none focus:border-[#9fb5e3]/60"
+                        inputMode="decimal"
+                        min="0"
+                        onChange={(event) =>
+                          setExpenseLines((current) =>
+                            current.map((entry, entryIndex) =>
+                              entryIndex === index
+                                ? {
+                                    ...entry,
+                                    amount: event.target.value
+                                      ? Number(event.target.value)
+                                      : null,
+                                  }
+                                : entry,
+                            ),
+                          )
+                        }
+                        step="0.01"
+                        type="number"
+                        value={line.amount ?? ""}
+                      />
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-[minmax(0,1fr)_6rem] gap-2">
+                    <div className="space-y-1.5">
+                      <p className="text-xs text-[#aaa6a4]">Kind</p>
+                      <Picker
+                        label={`Transaction ${index + 1} kind`}
+                        onChange={(value) => {
+                          if (value !== "expense" && value !== "income") return;
+                          setExpenseLines((current) =>
+                            current.map((entry, entryIndex) =>
+                              entryIndex === index
+                                ? { ...entry, transactionKind: value }
+                                : entry,
+                            ),
+                          );
+                        }}
+                        options={[
+                          { value: "expense", label: "Expense" },
+                          { value: "income", label: "Income" },
+                        ]}
+                        value={line.transactionKind}
+                      />
+                    </div>
+                    <label className="block space-y-1.5 text-xs text-[#aaa6a4]">
+                      Currency
+                      <input
+                        className="w-full rounded-xl border border-white/10 bg-[#171617] px-3 py-2.5 text-sm text-[#f4f0e9] outline-none focus:border-[#9fb5e3]/60"
+                        onChange={(event) =>
+                          setExpenseLines((current) =>
+                            current.map((entry, entryIndex) =>
+                              entryIndex === index
+                                ? { ...entry, currency: event.target.value }
+                                : entry,
+                            ),
+                          )
+                        }
+                        value={line.currency}
+                      />
+                    </label>
+                  </div>
+                  <TagPicker
+                    availableTags={tags}
+                    onChange={(selected) =>
+                      setExpenseLines((current) =>
+                        current.map((entry, entryIndex) =>
+                          entryIndex === index
+                            ? { ...entry, tags: selected }
+                            : entry,
+                        ),
+                      )
                     }
-                  }}
-                  options={[
-                    { value: "expense", label: "Expense" },
-                    { value: "income", label: "Income" },
-                  ]}
-                  value={transactionKind}
-                />
-              </div>
-              <div className="grid grid-cols-[minmax(0,1fr)_6rem] gap-3">
-                <label className="block space-y-1.5 text-xs text-[#aaa6a4]">
-                  Amount
-                  <input
-                    className="w-full rounded-xl border border-white/10 bg-[#211f21] px-3 py-2.5 text-sm text-[#f4f0e9] outline-none focus:border-[#9fb5e3]/60"
-                    inputMode="decimal"
-                    min="0"
-                    onChange={(event) => setAmount(event.target.value)}
-                    step="0.01"
-                    type="number"
-                    value={amount}
+                    value={line.tags ?? []}
                   />
-                </label>
-                <label className="block space-y-1.5 text-xs text-[#aaa6a4]">
-                  Currency
-                  <input
-                    className="w-full rounded-xl border border-white/10 bg-[#211f21] px-3 py-2.5 text-sm text-[#f4f0e9] outline-none focus:border-[#9fb5e3]/60"
-                    onChange={(event) => setCurrency(event.target.value)}
-                    value={currency}
-                  />
-                </label>
-              </div>
-            </>
+                  <button
+                    className="text-xs text-[#c98e89] hover:text-white"
+                    onClick={() =>
+                      setExpenseLines((current) =>
+                        current.filter((_, entryIndex) => entryIndex !== index),
+                      )
+                    }
+                    type="button"
+                  >
+                    Remove transaction
+                  </button>
+                </div>
+              ))}
+              <button
+                className="inline-flex min-h-9 items-center gap-2 rounded-full border border-white/10 px-3 text-xs text-[#d9d4d0] hover:border-white/25"
+                onClick={() =>
+                  setExpenseLines((current) => [
+                    ...current,
+                    {
+                      id: crypto.randomUUID(),
+                      title: "",
+                      amount: null,
+                      currency: "₹",
+                      transactionKind: "expense",
+                      tags: [],
+                    },
+                  ])
+                }
+                type="button"
+              >
+                <Plus size={14} />
+                Add transaction
+              </button>
+            </div>
           )}
 
           {editError && (
@@ -617,15 +1060,6 @@ function SavedItemCard({ item }: { item: OrganizerItem }) {
       )}
     </article>
   );
-}
-
-function toDateTimeLocal(value?: string) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
-    .toISOString()
-    .slice(0, 16);
 }
 
 function EmptyCollection({
@@ -662,26 +1096,112 @@ function CurrentDate() {
   );
 }
 
+function SpaceCard({
+  href,
+  name,
+  count,
+  latestItem,
+  layout = "scroll",
+  onClick,
+}: {
+  href: string;
+  name: string;
+  count: number;
+  latestItem?: OrganizerItem;
+  layout?: "grid" | "scroll";
+  onClick?: () => void;
+}) {
+  return (
+    <Link
+      className={`flex aspect-square flex-col justify-between rounded-2xl border border-white/[0.08] bg-[#1d1b1c] p-4 transition hover:border-[#9fb5e3]/40 hover:bg-[#211f21] ${
+        layout === "grid"
+          ? "w-full"
+          : "w-36 shrink-0 snap-start sm:w-40"
+      }`}
+      href={href}
+      onClick={onClick}
+    >
+      <div className="flex items-start justify-between">
+        <Archive className="text-[#9fb5e3]" size={20} />
+        <ArrowUpRight className="text-[#9fb5e3]" size={17} />
+      </div>
+      <div className="min-w-0">
+        <h3 className="serif-heading truncate text-xl text-[#f3efe9]">{name}</h3>
+        <p className="mt-1 text-xs text-[#8e8a89]">
+          {count} {count === 1 ? "item" : "items"}
+        </p>
+        <p className="mt-1 truncate text-[11px] text-[#8e8a89]">
+          {latestItem ? `Updated ${formatDay(latestItem.createdAt)}` : "No items yet"}
+        </p>
+      </div>
+    </Link>
+  );
+}
+
 export function HomeView() {
-  const { items, hydrated } = useOrganizerStore();
+  const { items, spaces, hydrated } = useOrganizerStore();
   const reminders = items
     .filter((item) => item.type === "reminder" && !item.done)
     .sort((a, b) => (a.dueAt ?? a.createdAt).localeCompare(b.dueAt ?? b.createdAt))
     .slice(0, 3);
-  const recent = items.slice(0, 4);
+  const recentSpaces = spaces
+    .map((space) => {
+      const spaceItems = items.filter((item) => item.spaceId === space.id);
+      const latestItem = spaceItems.reduce<OrganizerItem | undefined>(
+        (latest, item) =>
+          !latest || item.createdAt > latest.createdAt ? item : latest,
+        undefined,
+      );
+      return { space, count: spaceItems.length, latestItem };
+    })
+    .sort((left, right) =>
+      (right.latestItem?.createdAt ?? "").localeCompare(
+        left.latestItem?.createdAt ?? "",
+      ),
+    );
 
   return (
-    <div className="space-y-9">
-      <section>
+    <div className="flex flex-col gap-7">
+      <section className="order-0">
         <Suspense fallback={<p className="h-5 text-sm text-[#9e9997]">Today</p>}>
           <CurrentDate />
         </Suspense>
         <h1 className="serif-heading mt-2 max-w-2xl text-[2.4rem] leading-[1.08] tracking-tight text-[#f4f0e9] sm:text-5xl">
           Keep the little things close.
         </h1>
-        <p className="mt-3 max-w-md text-sm leading-6 text-[#a39e9b] sm:text-base">
-          A calm place for the things you want to remember.
-        </p>
+      </section>
+
+      <section>
+        <div className="mb-3 flex items-end justify-between">
+          <h2 className="serif-heading text-2xl text-[#f0ece6]">Spaces</h2>
+          <Link
+            className="inline-flex items-center gap-1 text-sm text-[#a9bddf] hover:text-white"
+            href="/library"
+          >
+            Manage <ArrowUpRight size={15} />
+          </Link>
+        </div>
+        {!hydrated ? (
+          <p className="py-4 text-sm text-[#8e8a89]">Loading your Spaces...</p>
+        ) : recentSpaces.length ? (
+          <div className="-mx-5 flex snap-x gap-3 overflow-x-auto px-5 pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:-mx-8 sm:px-8 lg:-mx-12 lg:px-12">
+            {recentSpaces.map(({ space, count, latestItem }) => (
+              <SpaceCard
+                href={`/library?space=${encodeURIComponent(space.id)}`}
+                key={space.id}
+                name={space.name}
+                count={count}
+                latestItem={latestItem}
+              />
+            ))}
+          </div>
+        ) : (
+          <EmptyCollection
+            description="Create a Space such as Recipes or Outfit Inspo in Library, then save content into it."
+            icon={Archive}
+            title="No Spaces yet"
+          />
+        )}
       </section>
 
       <section>
@@ -717,118 +1237,201 @@ export function HomeView() {
         )}
       </section>
 
-      <section>
-        <div className="mb-3 flex items-end justify-between">
-          <div>
-            <p className="text-xs font-medium uppercase tracking-[0.16em] text-[#858082]">
-              Recently saved
-            </p>
-            <h2 className="serif-heading mt-1 text-2xl text-[#f0ece6]">
-              Jump back in
-            </h2>
-          </div>
-          {items.length > 0 && (
-            <Link
-              className="inline-flex items-center gap-1 text-sm text-[#a9bddf] hover:text-white"
-              href="/library"
-            >
-              Library <ArrowUpRight size={15} />
-            </Link>
-          )}
-        </div>
-        {!hydrated ? (
-          <p className="py-4 text-sm text-[#8e8a89]">Loading your saved items...</p>
-        ) : recent.length ? (
-          <div className="grid gap-3 sm:grid-cols-2">
-            {recent.map((item) => (
-              <SavedItemCard item={item} key={item.id} />
-            ))}
-          </div>
-        ) : (
-          <EmptyCollection
-            description="Type a thought into the box below. Commonplace will help shape it into the right kind of item."
-            icon={Archive}
-            title="Your space starts with a thought"
-          />
-        )}
-      </section>
     </div>
   );
 }
 
 export function LibraryView() {
-  const { items, spaces, hydrated, createSpace, deleteSpace } =
+  const {
+    items,
+    spaces,
+    hydrated,
+    createSpace,
+    deleteSpace,
+  } =
     useOrganizerStore();
-  const [typeFilter, setTypeFilter] = useState<ItemType | "all">("all");
-  const [spaceFilter, setSpaceFilter] = useState("all");
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const routeTypeFilter = searchParams.get("type");
+  const typeFilter =
+    libraryTypes.find((type) => type === routeTypeFilter) ?? "all";
+  const selectedSpaceId = searchParams.get("space");
+  const selectedSpace = spaces.find((space) => space.id === selectedSpaceId);
+  const isUnfiled = selectedSpaceId === "unfiled";
+  const showingContents = Boolean(selectedSpace || isUnfiled);
+  const [query, setQuery] = useState("");
   const [manageSpaces, setManageSpaces] = useState(false);
   const [newSpaceName, setNewSpaceName] = useState("");
   const [spaceToDelete, setSpaceToDelete] = useState<string | null>(null);
+
+  const libraryItems = useMemo(
+    () => items.filter((item) => item.type !== "expense"),
+    [items],
+  );
+  const searchResults = useMemo(
+    () =>
+      !showingContents && query.trim()
+        ? libraryItems.filter(
+            (item) =>
+              (typeFilter === "all" || item.type === typeFilter) &&
+              searchableItemText(item).includes(query.trim().toLocaleLowerCase()),
+          )
+        : [],
+    [libraryItems, query, showingContents, typeFilter],
+  );
   const filteredItems = useMemo(
     () =>
-      items.filter(
+      libraryItems.filter(
         (item) =>
           (typeFilter === "all" || item.type === typeFilter) &&
-          (spaceFilter === "all" || item.spaceId === spaceFilter),
+          (selectedSpace
+            ? item.spaceId === selectedSpace.id
+            : isUnfiled
+              ? !item.spaceId
+              : false) &&
+          searchableItemText(item).includes(query.trim().toLocaleLowerCase()),
       ),
-    [items, spaceFilter, typeFilter],
+    [isUnfiled, libraryItems, query, selectedSpace, typeFilter],
   );
+  const visibleSpaces = useMemo(
+    () =>
+      spaces
+        .map((space) => {
+          const matchingItems = libraryItems.filter(
+            (item) =>
+              item.spaceId === space.id &&
+              (typeFilter === "all" || item.type === typeFilter),
+          );
+          const latestItem = matchingItems.reduce<OrganizerItem | undefined>(
+            (latest, item) =>
+              !latest || item.createdAt > latest.createdAt ? item : latest,
+            undefined,
+          );
+          return { space, count: matchingItems.length, latestItem };
+        })
+        .filter(
+          ({ space, count }) =>
+            (typeFilter === "all" || count > 0) &&
+            space.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+        )
+        .sort((left, right) =>
+          (right.latestItem?.createdAt ?? "").localeCompare(
+            left.latestItem?.createdAt ?? "",
+          ),
+        ),
+    [libraryItems, query, spaces, typeFilter],
+  );
+  const unfiledItems = libraryItems.filter(
+    (item) =>
+      !item.spaceId && (typeFilter === "all" || item.type === typeFilter),
+  );
+  const latestUnfiledItem = unfiledItems.reduce<OrganizerItem | undefined>(
+    (latest, item) =>
+      !latest || item.createdAt > latest.createdAt ? item : latest,
+    undefined,
+  );
+  const showUnfiledCard =
+    unfiledItems.length > 0 &&
+    "unfiled".includes(query.trim().toLocaleLowerCase());
+
+  useEffect(() => {
+    if (!hydrated || !showingContents || !window.location.hash) return;
+    const itemId = window.location.hash.slice(1);
+    window.requestAnimationFrame(() => {
+      document.getElementById(itemId)?.scrollIntoView({ block: "start" });
+    });
+  }, [hydrated, selectedSpaceId, showingContents, typeFilter]);
+
+  useEffect(() => {
+    if (routeTypeFilter === "expense") router.replace("/expenses");
+  }, [routeTypeFilter, router]);
 
   function handleCreateSpace(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!newSpaceName.trim()) return;
-    createSpace(newSpaceName);
-    setNewSpaceName("");
+    if (createSpace(newSpaceName)) setNewSpaceName("");
   }
 
   return (
     <div>
-      <p className="text-sm text-[#9e9997]">Everything you&apos;ve kept</p>
+      {showingContents && (
+        <Link
+          className="mb-6 inline-flex items-center gap-2 text-sm text-[#a9bddf] hover:text-white"
+          href="/library"
+          onClick={() => setQuery("")}
+        >
+          <ArrowUpRight className="rotate-[-135deg]" size={15} />
+          All spaces
+        </Link>
+      )}
       <h1 className="serif-heading mt-2 text-4xl text-[#f4f0e9] sm:text-5xl">
-        Library
+        {selectedSpace?.name ?? (isUnfiled ? "Unfiled" : "Library")}
       </h1>
       <p className="mt-3 max-w-lg text-sm leading-6 text-[#a39e9b]">
-        Browse your reminders, expenses, lists, moodboards, and notes in one place.
+        {showingContents
+          ? "Browse and search the items in this Space."
+          : "Choose a Space to browse the things you want to keep."}
       </p>
 
-      <div className="mt-7 flex gap-2 overflow-x-auto pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        {(["all", ...itemTypes] as const).map((type) => (
-          <button
-            aria-pressed={typeFilter === type}
-            className={`shrink-0 rounded-full border px-3.5 py-2 text-xs transition ${
-              typeFilter === type
-                ? "border-[#9fb5e3] bg-[#35496d] text-white"
-                : "border-white/10 text-[#aaa7a4] hover:border-white/25"
-            }`}
-            key={type}
-            onClick={() => setTypeFilter(type)}
-            type="button"
-          >
-            {type === "all" ? "Everything" : typeLabels[type]}
-          </button>
-        ))}
-      </div>
+      <label className="relative mt-6 block">
+        <Search
+          aria-hidden="true"
+          className="absolute left-3 top-1/2 -translate-y-1/2 text-[#898487]"
+          size={17}
+        />
+        <input
+          aria-label={
+            showingContents
+              ? `Search ${selectedSpace?.name ?? "unfiled items"}`
+              : "Search Spaces and saved items"
+          }
+          className="min-h-11 w-full rounded-xl border border-white/10 bg-[#211f21] pl-10 pr-4 text-sm text-[#f4f0e9] outline-none placeholder:text-[#969190] focus:border-[#9fb5e3]/60"
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={
+            showingContents
+              ? "Search titles and content"
+              : "Search Spaces and saved items"
+          }
+          type="search"
+          value={query}
+        />
+      </label>
 
-      <div className="mt-3 flex flex-wrap items-center gap-3">
-        {spaces.length > 0 && (
-          <div className="flex min-w-0 flex-1 items-center gap-3 text-xs text-[#8e8a89]">
-            Space
-            <div className="w-full max-w-[16rem]">
-              <Picker
-                label="Filter by Space"
-                onChange={setSpaceFilter}
-                options={[
-                  { value: "all", label: "All spaces" },
-                  ...spaces.map((space) => ({
-                    value: space.id,
-                    label: space.name,
-                  })),
-                ]}
-                value={spaceFilter}
-              />
-            </div>
+      {showingContents && (
+        <>
+          <div className="mt-7 flex gap-2 overflow-x-auto pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            {(["all", ...libraryTypes] as const).map((type) => (
+              <button
+                aria-pressed={typeFilter === type}
+                className={`shrink-0 rounded-full border px-3.5 py-2 text-xs transition ${
+                  typeFilter === type
+                    ? "border-[#9fb5e3] bg-[#35496d] text-white"
+                    : "border-white/10 text-[#aaa7a4] hover:border-white/25"
+                }`}
+                key={type}
+                onClick={() => {
+                  const params = new URLSearchParams(searchParams.toString());
+                  if (type === "all") {
+                    params.delete("type");
+                  } else {
+                    params.set("type", type);
+                  }
+                  const queryString = params.toString();
+                  router.replace(
+                    queryString ? `/library?${queryString}` : "/library",
+                    { scroll: false },
+                  );
+                }}
+                type="button"
+              >
+                {type === "all" ? "Everything" : typeLabels[type]}
+              </button>
+            ))}
           </div>
-        )}
+        </>
+      )}
+
+      <div className="mt-6 flex items-center justify-end">
         <button
           aria-expanded={manageSpaces}
           className="inline-flex min-h-10 items-center gap-2 rounded-full border border-white/10 px-3 text-xs text-[#d9d4d0] hover:border-white/25"
@@ -849,7 +1452,7 @@ export function LibraryView() {
           <form className="mt-3 flex gap-2" onSubmit={handleCreateSpace}>
             <input
               aria-label="New Space name"
-              className="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#211f21] px-3 py-2.5 text-sm text-[#f4f0e9] outline-none placeholder:text-[#777376] focus:border-[#9fb5e3]/60"
+              className="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#211f21] px-3 py-2.5 text-sm text-[#f4f0e9] outline-none placeholder:text-[#969190] focus:border-[#9fb5e3]/60"
               onChange={(event) => setNewSpaceName(event.target.value)}
               placeholder="e.g. Outfit Inspo"
               value={newSpaceName}
@@ -885,9 +1488,7 @@ export function LibraryView() {
                       <button
                         className="text-xs text-[#c98e89] hover:text-white"
                         onClick={() => {
-                          deleteSpace(space.id);
-                          if (spaceFilter === space.id) setSpaceFilter("all");
-                          setSpaceToDelete(null);
+                          if (deleteSpace(space.id)) setSpaceToDelete(null);
                         }}
                         type="button"
                       >
@@ -912,26 +1513,83 @@ export function LibraryView() {
               No spaces yet. Create one above or when saving an item.
             </p>
           )}
+          <BackupControls />
         </section>
       )}
 
-      <div className="mt-6 space-y-3">
-        {!hydrated ? (
-          <p className="py-8 text-sm text-[#8e8a89]">Loading your library...</p>
-        ) : filteredItems.length ? (
-          filteredItems.map((item) => <SavedItemCard item={item} key={item.id} />)
-        ) : (
-          <EmptyCollection
-            description={
-              items.length
-                ? "Try another type or Space filter."
-                : "Your saved items will appear here. Start with a thought in the box below."
-            }
-            icon={Archive}
-            title={items.length ? "No matches" : "Your library is ready"}
-          />
-        )}
-      </div>
+      {!showingContents ? (
+        <section className="mt-6">
+          {!hydrated ? (
+            <p className="py-8 text-sm text-[#8e8a89]">Loading your Spaces...</p>
+          ) : visibleSpaces.length || showUnfiledCard ? (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+              {visibleSpaces.map(({ space, count, latestItem }) => (
+                <SpaceCard
+                  href={`/library?space=${encodeURIComponent(space.id)}${typeFilter === "all" ? "" : `&type=${typeFilter}`}`}
+                  key={space.id}
+                  name={space.name}
+                  count={count}
+                  latestItem={latestItem}
+                  layout="grid"
+                  onClick={() => setQuery("")}
+                />
+              ))}
+              {showUnfiledCard && (
+                <SpaceCard
+                  href={`/library?space=unfiled${typeFilter === "all" ? "" : `&type=${typeFilter}`}`}
+                  name="Unfiled"
+                  count={unfiledItems.length}
+                  latestItem={latestUnfiledItem}
+                  layout="grid"
+                  onClick={() => setQuery("")}
+                />
+              )}
+            </div>
+          ) : searchResults.length ? null : (
+            <EmptyCollection
+              description={
+                spaces.length
+                  ? `No Spaces contain ${
+                      typeFilter === "all"
+                        ? "items"
+                        : `${typeLabels[typeFilter].toLowerCase()} items`
+                    }.`
+                  : "Create a Space here, or save an item into a new Space."
+              }
+              icon={Archive}
+              title={query ? "No Spaces or items found" : "No Spaces yet"}
+            />
+          )}
+        </section>
+      ) : (
+        <div className="mt-6 space-y-3">
+          {!hydrated ? (
+            <p className="py-8 text-sm text-[#8e8a89]">Loading items...</p>
+          ) : filteredItems.length ? (
+            filteredItems.map((item) => <SavedItemCard item={item} key={item.id} />)
+          ) : (
+            <EmptyCollection
+              description={
+                query
+                  ? "Try another title or search term."
+                  : "Items saved to this Space will appear here."
+              }
+              icon={Archive}
+              title={query ? "No matches" : "This Space is empty"}
+            />
+          )}
+        </div>
+      )}
+    {!showingContents && searchResults.length > 0 && (
+      <section className="mt-7 space-y-3">
+        <h2 className="text-sm font-medium text-[#d9d4d0]">
+          Matching items ({searchResults.length})
+        </h2>
+        {searchResults.map((item) => (
+          <SavedItemCard item={item} key={item.id} />
+        ))}
+      </section>
+    )}
     </div>
   );
 }
@@ -946,12 +1604,11 @@ export function RemindersView() {
 
   return (
     <div>
-      <p className="text-sm text-[#9e9997]">Dates and things to come back to</p>
       <h1 className="serif-heading mt-2 text-4xl text-[#f4f0e9] sm:text-5xl">
         Reminders
       </h1>
       <p className="mt-3 max-w-lg text-sm leading-6 text-[#a39e9b]">
-        Dates detected from your text are shown here. You can mark an item done whenever you&apos;re ready.
+        Saved reminders appear here; they won&apos;t notify you outside myspace.
       </p>
 
       {!hydrated ? (
@@ -1009,23 +1666,20 @@ export function ExpensesView() {
   const filteredExpenses =
     tagFilter === "all"
       ? expenses
-      : expenses.filter((item) => item.tags?.includes(tagFilter));
+      : expenses.filter((item) =>
+          getExpenseLines(item).some((line) => line.tags?.includes(tagFilter)),
+        );
   return (
     <div>
-      <p className="text-sm text-[#9e9997]">Income and spending, together</p>
       <h1 className="serif-heading mt-2 text-4xl text-[#f4f0e9] sm:text-5xl">
         Money
       </h1>
       <p className="mt-3 max-w-lg text-sm leading-6 text-[#a39e9b]">
-        Amounts and income or expense type are detected from your text when they&apos;re clear. Your original text is kept with every transaction.
+        Original capture text stays with every transaction.
       </p>
 
-      <section className="mt-7 rounded-[24px] border border-white/[0.08] bg-[#1d1b1c] p-5">
-        <Suspense
-          fallback={<p className="text-sm text-[#8e8a89]">Loading monthly total...</p>}
-        >
-          <MonthlyExpenseSummary expenses={expenses} />
-        </Suspense>
+      <section className="sticky top-[64px] z-[5] mt-5 rounded-[24px] border border-white/[0.08] bg-[#1d1b1c]/95 p-4 shadow-xl backdrop-blur sm:p-5">
+        <MoneyBalanceSummary expenses={expenses} />
       </section>
 
       <section className="mt-7">
@@ -1069,37 +1723,38 @@ export function ExpensesView() {
   );
 }
 
-function MonthlyExpenseSummary({ expenses }: { expenses: OrganizerItem[] }) {
-  const now = new Date();
-  const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  const monthExpenses = expenses.filter((item) =>
-    item.createdAt.startsWith(currentMonth),
+function MoneyBalanceSummary({ expenses }: { expenses: OrganizerItem[] }) {
+  const transactionCount = expenses.reduce(
+    (count, item) => count + getExpenseLines(item).length,
+    0,
   );
-  const currencyTotals = monthExpenses.reduce<
-    Record<string, { income: number; expense: number }>
-  >((totals, item) => {
-    const key = item.currency ?? "";
-    if (item.amount !== undefined) {
-      totals[key] ??= { income: 0, expense: 0 };
-      totals[key][item.transactionKind === "income" ? "income" : "expense"] +=
-        item.amount;
-    }
-    return totals;
-  }, {});
+  const currencyTotals = expenses
+    .flatMap(getExpenseLines)
+    .reduce<Record<string, { income: number; expense: number }>>(
+      (totals, line) => {
+        if (line.amount === null) return totals;
+        const currency = line.currency ?? "";
+        totals[currency] ??= { income: 0, expense: 0 };
+        totals[currency][line.transactionKind === "income" ? "income" : "expense"] +=
+          line.amount;
+        return totals;
+      },
+      {},
+    );
 
   return (
     <>
       <p className="text-xs font-medium uppercase tracking-[0.16em] text-[#8e8a89]">
-        This month
+        Income · expenses · balance
       </p>
       {Object.keys(currencyTotals).length ? (
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
           {Object.entries(currencyTotals).map(([currency, totals]) => (
-            <div className="rounded-2xl bg-[#171617] p-4" key={currency || "unspecified"}>
-              <p className="text-xs text-[#8e8a89]">
-                {currency || "Unspecified currency"}
+            <div className="rounded-2xl bg-[#171617] p-3" key={currency || "unspecified"}>
+              <p className="text-[11px] text-[#8e8a89]">
+                {currency || "Unspecified currency"} · all time
               </p>
-              <div className="mt-3 grid grid-cols-3 gap-2">
+              <div className="mt-2 grid grid-cols-3 gap-2">
                 <div>
                   <p className="text-xs text-[#9ebc99]">Income</p>
                   <p className="mt-1 break-words text-sm font-medium text-[#d5e5d0] sm:text-base">
@@ -1129,12 +1784,13 @@ function MonthlyExpenseSummary({ expenses }: { expenses: OrganizerItem[] }) {
           ))}
         </div>
       ) : (
-        <p className="serif-heading mt-2 text-3xl text-[#f1ede7]">
+        <p className="mt-2 text-sm text-[#f1ede7]">
           No transactions yet
         </p>
       )}
       <p className="mt-2 text-xs text-[#8e8a89]">
-        {monthExpenses.length} {monthExpenses.length === 1 ? "transaction" : "transactions"} recorded
+        {transactionCount}{" "}
+        {transactionCount === 1 ? "transaction" : "transactions"} recorded
       </p>
     </>
   );

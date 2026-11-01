@@ -2,8 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Archive, CalendarDays, House, ReceiptText } from "lucide-react";
+import {
+  Archive,
+  CalendarDays,
+  House,
+  ReceiptText,
+} from "lucide-react";
 import { CaptureBox } from "@/components/capture-box";
+import { useOrganizerStore } from "@/components/organizer-store";
 
 const tabs = [
   { label: "Home", href: "/", icon: House },
@@ -14,15 +20,16 @@ const tabs = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const { storageError, retryStorage } = useOrganizerStore();
 
   return (
     <div className="min-h-screen md:flex">
       <aside className="hidden w-64 shrink-0 border-r border-white/[0.08] bg-[#171617] px-5 py-7 md:flex md:flex-col">
         <Link href="/" className="flex items-center gap-3 px-2">
           <span className="grid size-10 place-items-center rounded-2xl bg-[#35496d] text-lg font-semibold text-[#c5d5f3]">
-            c
+            m
           </span>
-          <span className="text-[17px] font-medium tracking-tight text-[#f4f0e9]">commonplace</span>
+          <span className="text-[17px] font-medium tracking-tight text-[#f4f0e9]">myspace</span>
         </Link>
 
         <nav aria-label="Main navigation" className="mt-12 space-y-1">
@@ -46,29 +53,37 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           })}
         </nav>
 
-        <div className="mt-auto rounded-2xl border border-white/[0.08] bg-[#1d1b1c] p-4">
-          <p className="text-sm font-medium text-[#e7e3df]">A little space for everything.</p>
-          <p className="mt-1 text-xs leading-5 text-[#969190]">
-            Your personal organizer, kept simple.
-          </p>
-        </div>
       </aside>
 
       <div className="flex min-h-screen min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-10 flex h-[64px] shrink-0 items-center justify-between border-b border-white/[0.08] bg-[#171617]/90 px-5 backdrop-blur sm:px-8 lg:px-12">
           <Link href="/" className="flex items-center gap-2 md:hidden">
             <span className="grid size-8 place-items-center rounded-xl bg-[#35496d] font-semibold text-[#c5d5f3]">
-              c
+              m
             </span>
-            <span className="text-sm font-medium text-[#f4f0e9]">commonplace</span>
+            <span className="text-sm font-medium text-[#f4f0e9]">myspace</span>
           </Link>
-          <span className="hidden text-sm text-[#969190] md:block">
-            Your personal space
-          </span>
           <span className="text-xs text-[#969190] sm:text-sm">Your organizer</span>
         </header>
 
-        <main className="mx-auto w-full max-w-6xl flex-1 px-5 pb-56 pt-8 sm:px-8 sm:pt-12 md:pb-44 lg:px-12">
+        {storageError && (
+          <div
+            aria-live="assertive"
+            className="mx-auto mt-4 flex w-full max-w-6xl items-center gap-3 rounded-xl border border-[#8a514c]/40 bg-[#492a2a]/40 px-4 py-3 text-sm text-[#f0d7d2]"
+            role="alert"
+          >
+            <p className="min-w-0 flex-1">{storageError}</p>
+            <button
+              className="min-h-9 shrink-0 rounded-full border border-white/15 px-3 text-xs hover:bg-white/[0.08]"
+              onClick={retryStorage}
+              type="button"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        <main className="mx-auto w-full max-w-6xl flex-1 px-5 pb-[calc(18rem+env(safe-area-inset-bottom))] pt-8 sm:px-8 sm:pt-12 md:pb-44 lg:px-12">
           {children}
         </main>
 
